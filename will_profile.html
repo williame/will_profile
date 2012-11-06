@@ -1,0 +1,190 @@
+<html>
+<head><title>Will's Python sampling profiler viewer</title>
+<script type="text/javascript">
+
+var	width_sec = 60,
+	width_min = 6,
+	height_line = 25,
+	margin = 10,
+	baseline,
+	canvas_font = 'bold 15px sans-serif',
+	samples = [];
+	
+function same(prev,sample) {
+	var same_as_prev = 0;
+	if(prev && sample[1] == prev[1] && sample[2] == prev[2]) {
+		for(var i=0; ; i++)
+			if(i >= sample[3].length || i >= prev[3].length || 
+				sample[3][i][0] != prev[3][i][0] ||
+				sample[3][i][1] != prev[3][i][1]) {
+				same_as_prev = i;
+				break;
+			}
+	}
+	return same_as_prev;
+}
+
+function load(data) {
+	samples = [];
+	var	canvas = document.getElementById("viewer-canvas"),
+		prev = data[data.length-1],
+		prev_time = data[0][0],
+		x = margin*2 + measureStack(data[0][3]),
+		i = 0;
+	for(var i in data) {
+		var	sample = data[i],
+			same_as_prev = same(prev,sample);
+		if(same_as_prev  == sample[3].length && same_as_prev == prev[3].length)
+			continue;
+		var	now = sample[0],
+			duration = now-prev_time,
+			w = Math.max(Math.round(duration*width_sec+0.5),width_min);
+		if(x+w > 32767) {
+			alert("too many samples; truncated output");
+			break;
+		}
+		sample.push([x,w,duration]);
+		samples.push(sample);
+		x += w + 1;
+		prev = sample;
+		prev_time = sample[0];
+	}
+	samples.push([sample[0],null,null,[],[x,0,0]]); // sentinal
+	canvas.width = x;
+	canvas.height = document.body.clientHeight-canvas.offsetTop-20;
+	baseline = canvas.height*0.95;
+	draw();
+}
+
+function draw(prev_lock) {
+	var	canvas = document.getElementById("viewer-canvas"),
+		ctx = canvas.getContext("2d"),
+		prev = null;
+	for(var sample in samples) {
+		sample = samples[sample];
+		draw_sample(canvas,ctx,prev_lock||prev,sample);
+		prev = sample;
+	}
+
+}
+
+function draw_sample(canvas,ctx,prev,sample) {
+	var	x = sample[4][0],
+		y = baseline,
+		w = sample[4][1],
+		same_as_prev = same(prev,sample),
+		same_height = same_as_prev*height_line,
+		diff_height = (sample[3].length-same_as_prev)*height_line;
+	if(same_height > 0) {
+		ctx.fillStyle="#FF0000";
+		ctx.fillRect(x,y-same_height,w,same_height);
+	}
+	if(diff_height > 0) {
+		ctx.fillStyle="#0000FF";
+		ctx.fillRect(x,y-(same_height+diff_height),w,diff_height);
+	}
+}
+
+function measureStack(stack) {
+	var	canvas = document.getElementById("viewer-canvas"),
+		ctx = canvas.getContext("2d"),
+		w = 0;
+        ctx.font = canvas_font;
+	for(var line in stack) {
+		line = stack[line];
+		line = ""+line[2]+"#"+line[1]+" "+line[3];
+		w = Math.max(w,ctx.measureText(line).width);
+	}
+	return w;
+}
+
+function poorMansOutlinedText(ctx,text,x,y,bgColour,fgColour) {
+	ctx.fillStyle = bgColour;
+	for(var xofs=-1; xofs<2; xofs++)
+		for(var yofs=-1; yofs<2; yofs++)
+			ctx.fillText(text,x+xofs,y+yofs);
+	ctx.fillStyle = fgColour;
+	ctx.fillText(text,x,y);
+}
+
+function info(e) {
+	var	canvas = document.getElementById("viewer-canvas"),
+		ctx = canvas.getContext("2d"),
+        	x = e.pageX - canvas.offsetLeft,
+        	y = e.pageY - canvas.offsetTop;
+	if(info.hit) {
+		// check if we are still over the same sample
+		var sample = info.hit[0];
+		if(x >= sample[4][0] && x < (sample[4][0]+sample[4][1]))
+			return;
+		ctx.clearRect(0,0,canvas.width,canvas.height);
+		info.hit = null;
+	}
+        // find the stack trace we're over right now
+        // TODO binary search if this is a problem
+        for(var sample in samples) {
+        	sample = samples[sample];
+		if(sample.length < 5) // truncated
+			break;
+		if(x >= sample[4][0] && x < (sample[4][0]+sample[4][1])) {
+			info.hit = [sample];
+			break;
+		}
+	}
+	if(!info.hit) {
+		draw();
+		return;
+	}
+	ctx.fillStyle = "rgb(200,200,240)";
+	ctx.fillRect(sample[4][0],0,sample[4][1],canvas.height);
+	draw(sample);
+        ctx.font = canvas_font;
+	var	w = measureStack(sample[3]) + margin * 2,
+		h = sample[3].length*height_line;
+	info.hit_rect = {x: sample[4][0]-w, y: baseline-h, w:w, h:h};
+	// and draw it
+        ctx.fillStyle = "rgba(200,200,200,0.2)";
+        ctx.fillRect(info.hit_rect.x,info.hit_rect.y,info.hit_rect.w,info.hit_rect.h);
+        ctx.textBaseline = "top";
+	var y = baseline-height_line+4;
+	for(var line in sample[3]) {
+		line = sample[3][line];
+		line = ""+line[2]+"#"+line[1]+" "+line[3];
+		x = w-(margin+ctx.measureText(line).width);
+		poorMansOutlinedText(ctx,line,info.hit_rect.x+x,y,"rgb(40,40,40)","rgb(255,255,255)");
+		y -= height_line;
+	}
+	var time_info = ""+(sample[4][2]*1000).toFixed(2)+"ms @ "+(sample[0]-samples[0][0]).toFixed(2)+"s";
+	poorMansOutlinedText(ctx,time_info,sample[4][0]+sample[4][1]-ctx.measureText(time_info).width,height_line,"rgb(255,255,255)","rgb(40,40,40)");
+}
+
+function start(file) {
+	var reader = new FileReader();
+	reader.onload = function(e) {
+		load(JSON.parse(e.target.result));
+	};
+	reader.readAsBinaryString(file);
+}
+
+function init() {
+	var canvas = document.getElementById("viewer-canvas");
+	canvas.addEventListener('mousedown',info,false);
+	window.onresize = function() {
+		info.dirty = null;
+		if(samples.length) // simple way to fully redraw
+			load(samples);
+	};
+	window.onresize();
+	if(window.File && window.FileReader && window.FileList && window.Blob) {
+	} else
+		alert('The File APIs are not fully supported in this browser');
+}
+
+</script>
+<body onload="init()">
+<p>open a file you want to view: <input type="file" onchange="start(this.files[0])"/></p>
+<canvas id="viewer-canvas">
+Sorry, you don't have a canvas to visualise on :(
+</canvas>
+</body>
+</head>
