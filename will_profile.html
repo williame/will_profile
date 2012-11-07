@@ -24,33 +24,51 @@ function same(prev,sample) {
 	return same_as_prev;
 }
 
+function measureText(ctx,text) {
+	if(text in measureText.cache)
+		return measureText.cache[text];
+	return measureText.cache[text] = ctx.measureText(text).width;
+}
+
 function load(data) {
+	measureText.cache = {};
 	samples = [];
 	var	canvas = document.getElementById("viewer-canvas"),
 		prev = data[data.length-1],
 		prev_time = data[0][0],
-		x = margin*2 + measureStack(data[0][3]),
+		x = margin*2,
+		w = x,
 		i = 0;
 	for(var i in data) {
 		var	sample = data[i],
 			same_as_prev = same(prev,sample);
 		if(same_as_prev  == sample[3].length && same_as_prev == prev[3].length)
 			continue;
-		var	now = sample[0],
-			duration = now-prev_time,
-			w = Math.max(Math.round(duration*width_sec+0.5),width_min);
-		if(x+w > 32767) {
+		var	now = sample[0];
+		sample.x = x;
+		sample.duration = now-prev_time;
+		sample.w = Math.max(Math.round(sample.duration*width_sec+0.5),width_min);
+		sample.width_stack = measureStack(sample[3]);
+		var new_width = Math.max(w,x+Math.max(sample.w,sample.width_stack));
+		if(new_width > 32767) {
 			alert("too many samples; truncated output");
 			break;
 		}
-		sample.push([x,w,duration]);
+		w = new_width;
+		if(sample.width_stack > x) { // shuffle all to make room for it
+			//TODO
+		}
 		samples.push(sample);
-		x += w + 1;
+		x += sample.w + 1;
 		prev = sample;
 		prev_time = sample[0];
 	}
-	samples.push([sample[0],null,null,[],[x,0,0]]); // sentinal
-	canvas.width = x;
+	var sentinal = [sample[0],null,null,[]];
+	sentinal.x = x;
+	sentinal.w = 0;
+	sentinal.width_stack = 0;
+	samples.push(sentinal);
+	canvas.width = w;
 	canvas.height = document.body.clientHeight-canvas.offsetTop-20;
 	baseline = canvas.height*0.95;
 	draw();
@@ -69,9 +87,9 @@ function draw(prev_lock) {
 }
 
 function draw_sample(canvas,ctx,prev,sample) {
-	var	x = sample[4][0],
+	var	x = sample.x,
 		y = baseline,
-		w = sample[4][1],
+		w = sample.w,
 		same_as_prev = same(prev,sample),
 		same_height = same_as_prev*height_line,
 		diff_height = (sample[3].length-same_as_prev)*height_line;
@@ -93,7 +111,7 @@ function measureStack(stack) {
 	for(var line in stack) {
 		line = stack[line];
 		line = ""+line[2]+"#"+line[1]+" "+line[3];
-		w = Math.max(w,ctx.measureText(line).width);
+		w = Math.max(w,measureText(ctx,line));
 	}
 	return w;
 }
@@ -108,14 +126,28 @@ function poorMansOutlinedText(ctx,text,x,y,bgColour,fgColour) {
 }
 
 function info(e) {
+	e = e || window.event;
 	var	canvas = document.getElementById("viewer-canvas"),
 		ctx = canvas.getContext("2d"),
         	x = e.pageX - canvas.offsetLeft,
         	y = e.pageY - canvas.offsetTop;
+	if(e.type == "mousemove") {
+		var tooltip = document.getElementById("tooltip");
+		if(info.hit && x >= info.hit_rect.x && x < info.hit_rect.x+info.hit_rect.w &&
+			y >= info.hit_rect.y && y < info.hit_rect.y+info.hit_rect.h) {
+			var row = info.hit[3].length-Math.round((y-info.hit_rect.y) / height_line - 0.5)-1; 
+			tooltip.innerHTML = escape(info.hit[3][row][0]).replace(/%(..)/g,"&#x$1;");
+			tooltip.style.display = "";
+			tooltip.style.left = ""+(e.pageX+10)+"px";
+			tooltip.style.top = ""+e.pageY+"px";
+		} else {
+			tooltip.style.display = "none";
+		}
+		return;
+	}
 	if(info.hit) {
 		// check if we are still over the same sample
-		var sample = info.hit[0];
-		if(x >= sample[4][0] && x < (sample[4][0]+sample[4][1]))
+		if(x >= info.hit.x && x < (info.hit.x+info.hit.w))
 			return;
 		ctx.clearRect(0,0,canvas.width,canvas.height);
 		info.hit = null;
@@ -124,10 +156,8 @@ function info(e) {
         // TODO binary search if this is a problem
         for(var sample in samples) {
         	sample = samples[sample];
-		if(sample.length < 5) // truncated
-			break;
-		if(x >= sample[4][0] && x < (sample[4][0]+sample[4][1])) {
-			info.hit = [sample];
+        	if(x >= sample.x && x < (sample.x+sample.w)) {
+			info.hit = sample;
 			break;
 		}
 	}
@@ -136,26 +166,24 @@ function info(e) {
 		return;
 	}
 	ctx.fillStyle = "rgb(200,200,240)";
-	ctx.fillRect(sample[4][0],0,sample[4][1],canvas.height);
+	ctx.fillRect(sample.x,0,sample.w,canvas.height);
 	draw(sample);
         ctx.font = canvas_font;
-	var	w = measureStack(sample[3]) + margin * 2,
-		h = sample[3].length*height_line;
-	info.hit_rect = {x: sample[4][0]-w, y: baseline-h, w:w, h:h};
+        var h = sample[3].length*height_line;
+	info.hit_rect = {x:sample.x, y:baseline-h, w:sample.width_stack+margin*2, h:h};
 	// and draw it
-        ctx.fillStyle = "rgba(200,200,200,0.2)";
+        ctx.fillStyle = "rgba(200,200,200,0.3)";
         ctx.fillRect(info.hit_rect.x,info.hit_rect.y,info.hit_rect.w,info.hit_rect.h);
         ctx.textBaseline = "top";
 	var y = baseline-height_line+4;
 	for(var line in sample[3]) {
 		line = sample[3][line];
 		line = ""+line[2]+"#"+line[1]+" "+line[3];
-		x = w-(margin+ctx.measureText(line).width);
-		poorMansOutlinedText(ctx,line,info.hit_rect.x+x,y,"rgb(40,40,40)","rgb(255,255,255)");
+		poorMansOutlinedText(ctx,line,info.hit_rect.x+margin,y,"rgb(40,40,40)","rgb(255,255,255)");
 		y -= height_line;
 	}
-	var time_info = ""+(sample[4][2]*1000).toFixed(2)+"ms @ "+(sample[0]-samples[0][0]).toFixed(2)+"s";
-	poorMansOutlinedText(ctx,time_info,sample[4][0]+sample[4][1]-ctx.measureText(time_info).width,height_line,"rgb(255,255,255)","rgb(40,40,40)");
+	var time_info = ""+(sample.duration*1000).toFixed(2)+"ms @ "+(sample[0]-samples[0][0]).toFixed(2)+"s";
+	poorMansOutlinedText(ctx,time_info,sample.x+sample.w-ctx.measureText(time_info).width,height_line,"rgb(255,255,255)","rgb(40,40,40)");
 }
 
 function start(file) {
@@ -169,10 +197,14 @@ function start(file) {
 function init() {
 	var canvas = document.getElementById("viewer-canvas");
 	canvas.addEventListener('mousedown',info,false);
+	canvas.addEventListener('mousemove',info,false);
 	window.onresize = function() {
 		info.dirty = null;
-		if(samples.length) // simple way to fully redraw
-			load(samples);
+		if(samples.length) { // simple way to fully relayout
+			var data = [[samples[0][0]-samples[0].duration,null,null,[]]].concat(samples);
+			console.log(data,samples);
+			load(data);
+		}
 	};
 	window.onresize();
 	if(window.File && window.FileReader && window.FileList && window.Blob) {
@@ -181,8 +213,9 @@ function init() {
 }
 
 </script>
-<body onload="init()">
+<body style="font-family:sans-serif;" onload="init()">
 <p>open a file you want to view: <input type="file" onchange="start(this.files[0])"/></p>
+<div id="tooltip" style="position:absolute; display:none; background-color:yellow; color:blue;"></div>
 <canvas id="viewer-canvas">
 Sorry, you don't have a canvas to visualise on :(
 </canvas>
