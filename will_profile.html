@@ -32,25 +32,32 @@ function measureText(ctx,text) {
 
 function load(data) {
 	measureText.cache = {};
+	info.hit = null;
+	document.getElementById("tooltip").style.display = "none";
 	samples = [];
 	var	canvas = document.getElementById("viewer-canvas"),
-		prev = data[data.length-1],
-		prev_time = data[0][0],
+		prev = null,
 		x = margin*2,
 		w = x,
 		i = 0;
 	for(var i in data) {
+		if(i == data.length-1) // last is sentinal
+			break;
 		var	sample = data[i],
 			same_as_prev = same(prev,sample);
-		if(same_as_prev  == sample[3].length && same_as_prev == prev[3].length)
-			continue;
-		var	now = sample[0];
 		sample.x = x;
-		sample.duration = now-prev_time;
-		sample.w = Math.max(Math.round(sample.duration*width_sec+0.5),width_min);
-		sample.width_stack = measureStack(sample[3]);
+		sample.duration = sample.duration || data[eval(i)+1][0]-sample[0];
+		sample.w = sample.w || Math.max(Math.round(sample.duration*width_sec+0.5),width_min);
+		if(same_as_prev  == sample[3].length && same_as_prev == prev[3].length) {
+			// as the stacks are the same, join the samples
+			x -= prev.w + 1;
+			prev.w += sample.w;
+			prev.duration += sample.duration;
+			sample = prev;
+		} else
+			sample.width_stack = measureStack(sample[3]);
 		var new_width = Math.max(w,x+Math.max(sample.w,sample.width_stack));
-		if(new_width > 32767) {
+		if(new_width > 32767) { //MacOS canvas limit
 			alert("too many samples; truncated output");
 			break;
 		}
@@ -58,16 +65,12 @@ function load(data) {
 		if(sample.width_stack > x) { // shuffle all to make room for it
 			//TODO
 		}
-		samples.push(sample);
 		x += sample.w + 1;
-		prev = sample;
-		prev_time = sample[0];
+		if(sample != prev) {
+			samples.push(sample);
+			prev = sample;
+		}
 	}
-	var sentinal = [sample[0],null,null,[]];
-	sentinal.x = x;
-	sentinal.w = 0;
-	sentinal.width_stack = 0;
-	samples.push(sentinal);
 	canvas.width = w;
 	canvas.height = document.body.clientHeight-canvas.offsetTop-20;
 	baseline = canvas.height*0.95;
@@ -129,52 +132,65 @@ function info(e) {
 	e = e || window.event;
 	var	canvas = document.getElementById("viewer-canvas"),
 		ctx = canvas.getContext("2d"),
+		tooltip = document.getElementById("tooltip"),
         	x = e.pageX - canvas.offsetLeft,
-        	y = e.pageY - canvas.offsetTop;
+        	y = e.pageY - canvas.offsetTop,
+        	sample = info.hit;
 	if(e.type == "mousemove") {
-		var tooltip = document.getElementById("tooltip");
-		if(info.hit && x >= info.hit_rect.x && x < info.hit_rect.x+info.hit_rect.w &&
+		var dirty = false;
+		if(sample && x >= info.hit_rect.x && x < info.hit_rect.x+info.hit_rect.w &&
 			y >= info.hit_rect.y && y < info.hit_rect.y+info.hit_rect.h) {
-			var row = info.hit[3].length-Math.round((y-info.hit_rect.y) / height_line - 0.5)-1; 
-			tooltip.innerHTML = escape(info.hit[3][row][0]).replace(/%(..)/g,"&#x$1;");
+			var row = sample[3].length-Math.round((y-info.hit_rect.y) / height_line - 0.5)-1;
+			dirty = (row != info.hit_frame);
+			info.hit_frame = row;
+			tooltip.innerHTML = escape(sample[3][row][0]).replace(/%(..)/g,"&#x$1;");
 			tooltip.style.display = "";
 			tooltip.style.left = ""+(e.pageX+10)+"px";
 			tooltip.style.top = ""+e.pageY+"px";
 		} else {
 			tooltip.style.display = "none";
 		}
-		return;
-	}
-	if(info.hit) {
-		// check if we are still over the same sample
-		if(x >= info.hit.x && x < (info.hit.x+info.hit.w))
+		if(!dirty)
 			return;
-		ctx.clearRect(0,0,canvas.width,canvas.height);
-		info.hit = null;
-	}
-        // find the stack trace we're over right now
-        // TODO binary search if this is a problem
-        for(var sample in samples) {
-        	sample = samples[sample];
-        	if(x >= sample.x && x < (sample.x+sample.w)) {
-			info.hit = sample;
-			break;
+	} else {
+		if(info.hit) {
+			// check if we are still over the same sample
+			if(x >= info.hit.x && x < (info.hit.x+info.hit.w))
+				return;
+			ctx.clearRect(0,0,canvas.width,canvas.height);
+			info.hit = null;
+			tooltip.style.display = "none";
+			info.hit_frame = null;
+		}
+		// find the stack trace we're over right now
+		// TODO binary search if this is a problem
+		for(var sample in samples) {
+			sample = samples[sample];
+			if(x >= sample.x && x < (sample.x+sample.w)) {
+				info.hit = sample;
+				break;
+			}
+		}
+		if(!info.hit) {
+			draw();
+			return;
 		}
 	}
-	if(!info.hit) {
-		draw();
-		return;
-	}
+	canvas.width = canvas.width;
 	ctx.fillStyle = "rgb(200,200,240)";
 	ctx.fillRect(sample.x,0,sample.w,canvas.height);
 	draw(sample);
-        ctx.font = canvas_font;
-        var h = sample[3].length*height_line;
+	ctx.font = canvas_font;
+	var h = sample[3].length*height_line;
 	info.hit_rect = {x:sample.x, y:baseline-h, w:sample.width_stack+margin*2, h:h};
 	// and draw it
-        ctx.fillStyle = "rgba(200,200,200,0.3)";
-        ctx.fillRect(info.hit_rect.x,info.hit_rect.y,info.hit_rect.w,info.hit_rect.h);
-        ctx.textBaseline = "top";
+	if(info.hit_frame != null) {
+		ctx.fillStyle = "rgba(200,200,200,0.4)";
+		ctx.fillRect(0,info.hit_rect.y+(sample[3].length-1-info.hit_frame)*height_line,canvas.width,height_line);
+	}
+	ctx.fillStyle = "rgba(200,200,200,0.3)";
+	ctx.fillRect(info.hit_rect.x,info.hit_rect.y,info.hit_rect.w,info.hit_rect.h);
+	ctx.textBaseline = "top";
 	var y = baseline-height_line+4;
 	for(var line in sample[3]) {
 		line = sample[3][line];
@@ -201,8 +217,8 @@ function init() {
 	window.onresize = function() {
 		info.dirty = null;
 		if(samples.length) { // simple way to fully relayout
-			var data = [[samples[0][0]-samples[0].duration,null,null,[]]].concat(samples);
-			console.log(data,samples);
+			var	last = samples[samples.length-1],
+				data = samples.concat([[last[0]+last.duration,null,null,[]]]); // put the sentinal back
 			load(data);
 		}
 	};
